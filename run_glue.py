@@ -71,7 +71,12 @@ def train(args, train_dataset, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_device_train_batch_size
-    train_sampler = RandomSampler(train_dataset)
+    if args.world_size > 1:
+        train_sampler = DistributedSampler(train_dataset, 
+                                        num_replicas=args.world_size, 
+                                        rank=args.local_rank)
+    else:
+        train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
@@ -134,6 +139,26 @@ def train(args, train_dataset, model, tokenizer):
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
                 ##################################################
+                if args.world_size > 1:
+                    for param in model.parameters():
+                        if param.grad is None:
+                            continue
+                        grad = param.grad.data
+
+                        if args.local_rank == 0:
+                            # Rank 0 gathers gradients from all workers
+                            gather_list = [torch.zeros_like(grad) for _ in range(args.world_size)]
+                            torch.distributed.gather(grad, gather_list=gather_list, dst=0)
+                            # Average them
+                            mean_grad = torch.mean(torch.stack(gather_list), dim=0)
+                            # Scatter the average back to all workers
+                            scatter_list = [mean_grad.clone() for _ in range(args.world_size)]
+                            torch.distributed.scatter(grad, scatter_list=scatter_list, src=0)
+                        else:
+                            torch.distributed.gather(grad, dst=0)
+                            torch.distributed.scatter(grad, src=0)
+
+                        param.grad.data = grad
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
@@ -348,6 +373,10 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
+    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--master_ip", type=str, default="127.0.0.1")
+    parser.add_argument("--master_port", type=str, default="12345")
+    parser.add_argument("--world_size", type=int, default=1)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -366,6 +395,14 @@ def main():
 
     # Set seed
     set_seed(args)
+
+    if args.world_size > 1:
+        torch.distributed.init_process_group(
+            backend='gloo',
+            init_method=f"tcp://{args.master_ip}:{args.master_port}",
+            world_size=args.world_size,
+            rank=args.local_rank
+        )
 
     # Prepare GLUE task
     args.task_name = args.task_name.lower()

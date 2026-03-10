@@ -286,7 +286,7 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)
 
-    if args.local_rank == 0:
+    if args.local_rank != -1:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
 
     # Convert to Tensors and build dataset
@@ -427,7 +427,7 @@ def main():
     model = model_class.from_pretrained(args.model_name_or_path, config=config)
     ##################################################
 
-    if args.local_rank == 0:
+    if args.local_rank != -1:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)

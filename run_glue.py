@@ -373,7 +373,6 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
-    parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--master_ip", type=str, default="127.0.0.1")
     parser.add_argument("--master_port", type=str, default="12345")
     parser.add_argument("--world_size", type=int, default=1)

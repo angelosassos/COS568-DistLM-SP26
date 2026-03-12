@@ -22,6 +22,10 @@ import glob
 import logging
 import os
 import random
+import time
+import matplotib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 import numpy as np
 import torch
@@ -69,6 +73,9 @@ def set_seed(args):
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
+    loss_values = []
+    iteration_times = []
+    iter_start = None
 
     args.train_batch_size = args.per_device_train_batch_size
     if args.world_size > 1:
@@ -114,7 +121,14 @@ def train(args, train_dataset, model, tokenizer):
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
+    prof = torch.profiler.profile(
+        schedule=torch.profiler.schedule(skip_first=1, wait=0, warmup=0, active=3),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/rank_{args.local_rank}'),
+        record_shapes=True,
+        with_stack=True
+    )
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
+    prof.start()
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
@@ -171,6 +185,18 @@ def train(args, train_dataset, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
 
+            loss_values.append(loss.item())
+            print(f"[Rank {args.local_rank}] Step {step} Loss: {loss.item():.4f}")
+
+            if step == 0:
+                iter_start = time.time()
+            else:
+                iter_end = time.time()
+                iteration_times.append(iter_end - iter_start)
+                iter_start = time.time()
+
+            prof.step()
+
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
@@ -182,7 +208,37 @@ def train(args, train_dataset, model, tokenizer):
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
         evaluate(args, model, tokenizer)
         ##################################################
+    prof.stop()
 
+    key_averages = prof.key_averages()
+    with open(f'profiler_summary_rank_{args.local_rank}.txt', 'w') as f:
+        f.write(str(key_averages.table(sort_by="cpu_time_total", row_limit=20)))
+
+    total_time = sum([item.cpu_time_total for item in key_averages])
+    comm_time = sum([item.cpu_time_total for item in key_averages 
+                    if any(op in item.key.lower() for op in ['gather', 'scatter', 'allreduce', 'all_reduce', 'send', 'recv', 'gloo'])])
+    comm_percentage = (comm_time / total_time) * 100 if total_time > 0 else 0
+    print(f"[Rank {args.local_rank}] Communication overhead: {comm_percentage:.2f}%")
+    with open(f'comm_overhead_rank_{args.local_rank}.txt', 'w') as f:
+        f.write(f"Total time: {total_time/1e6:.2f}s\n")
+        f.write(f"Communication time: {comm_time/1e6:.2f}s\n")
+        f.write(f"Communication overhead: {comm_percentage:.2f}%\n")
+    plt.figure()
+    plt.plot(loss_values)
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title(f'Loss Curve - Rank {args.local_rank}')
+    plt.savefig(f'loss_curve_rank_{args.local_rank}.png')
+    plt.close()
+
+    if iteration_times:
+        avg_time = sum(iteration_times) / len(iteration_times)
+        print(f"[Rank {args.local_rank}] Average iteration time (excluding first): {avg_time:.2f}s")
+        with open(f'timing_rank_{args.local_rank}.txt', 'w') as f:
+            f.write(f"Average iteration time (excluding first): {avg_time:.2f}s\n")
+            for i, t in enumerate(iteration_times):
+                f.write(f"Iteration {i+2}: {t:.2f}s\n")
+    
     return global_step, tr_loss / global_step
 
 

@@ -122,7 +122,7 @@ def train(args, train_dataset, model, tokenizer):
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     prof = torch.profiler.profile(
-        schedule=torch.profiler.schedule(skip_first=1, wait=0, warmup=0, active=3),
+        schedule=torch.profiler.schedule(skip_first=1, wait=0, warmup=0, active=3, repeat=1),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/rank_{args.local_rank}'),
         record_shapes=True,
         with_stack=True

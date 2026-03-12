@@ -23,7 +23,7 @@ import logging
 import os
 import random
 import time
-import matplotib
+import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

@@ -153,6 +153,12 @@ def train(args, train_dataset, model, tokenizer):
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
                 ##################################################
+                if args.world_size > 1:
+                    for param in model.parameters():
+                        if param.grad is None:
+                            continue
+                        torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
+                        param.grad.data /= args.world_size
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
@@ -467,8 +473,6 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)
-    if args.world_size > 1:
-        model = torch.nn.parallel.DistributedDataParallel(model)
 
     logger.info("Training/evaluation parameters %s", args)
 

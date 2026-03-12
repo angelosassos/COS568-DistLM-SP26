@@ -22,10 +22,6 @@ import glob
 import logging
 import os
 import random
-import time
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 import numpy as np
 import torch
@@ -73,17 +69,9 @@ def set_seed(args):
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
-    loss_values = []
-    iteration_times = []
-    iter_start = None
 
     args.train_batch_size = args.per_device_train_batch_size
-    if args.world_size > 1:
-        train_sampler = DistributedSampler(train_dataset, 
-                                        num_replicas=args.world_size, 
-                                        rank=args.local_rank)
-    else:
-        train_sampler = RandomSampler(train_dataset)
+    train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
@@ -121,15 +109,8 @@ def train(args, train_dataset, model, tokenizer):
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
-    prof = torch.profiler.profile(
-        schedule=torch.profiler.schedule(skip_first=1, wait=0, warmup=0, active=3, repeat=1),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/rank_{args.local_rank}'),
-        record_shapes=True,
-        with_stack=True
-    )
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    prof.start()
-    for _ in train_iterator:
+    for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
             model.train()
@@ -153,12 +134,6 @@ def train(args, train_dataset, model, tokenizer):
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
                 ##################################################
-                if args.world_size > 1:
-                    for param in model.parameters():
-                        if param.grad is None:
-                            continue
-                        torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
-                        param.grad.data /= args.world_size
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
@@ -166,22 +141,10 @@ def train(args, train_dataset, model, tokenizer):
                 ##################################################
                 # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
                 optimizer.step()
-                ##############################################
+                ##################################################
                 scheduler.step() # Update learning rate schedule
                 model.zero_grad()
                 global_step += 1
-
-            loss_values.append(loss.item())
-            print(f"[Rank {args.local_rank}] Step {step} Loss: {loss.item():.4f}")
-
-            if step == 0:
-                iter_start = time.time()
-            else:
-                iter_end = time.time()
-                iteration_times.append(iter_end - iter_start)
-                iter_start = time.time()
-
-            prof.step()
 
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -192,39 +155,9 @@ def train(args, train_dataset, model, tokenizer):
         
         ##################################################
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
-        evaluate(args, model, tokenizer)
+        evaluate(args, model, tokenizer, prefix="-epoch-{}".format(epoch))
         ##################################################
-    prof.stop()
 
-    key_averages = prof.key_averages()
-    with open(f'profiler_summary_rank_{args.local_rank}.txt', 'w') as f:
-        f.write(str(key_averages.table(sort_by="cpu_time_total", row_limit=20)))
-
-    total_time = sum([item.cpu_time_total for item in key_averages])
-    comm_time = sum([item.cpu_time_total for item in key_averages 
-                    if any(op in item.key.lower() for op in ['gather', 'scatter', 'allreduce', 'all_reduce', 'send', 'recv', 'gloo'])])
-    comm_percentage = (comm_time / total_time) * 100 if total_time > 0 else 0
-    print(f"[Rank {args.local_rank}] Communication overhead: {comm_percentage:.2f}%")
-    with open(f'comm_overhead_rank_{args.local_rank}.txt', 'w') as f:
-        f.write(f"Total time: {total_time/1e6:.2f}s\n")
-        f.write(f"Communication time: {comm_time/1e6:.2f}s\n")
-        f.write(f"Communication overhead: {comm_percentage:.2f}%\n")
-    plt.figure()
-    plt.plot(loss_values)
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title(f'Loss Curve - Rank {args.local_rank}')
-    plt.savefig(f'loss_curve_rank_{args.local_rank}.png')
-    plt.close()
-
-    if iteration_times:
-        avg_time = sum(iteration_times) / len(iteration_times)
-        print(f"[Rank {args.local_rank}] Average iteration time (excluding first): {avg_time:.2f}s")
-        with open(f'timing_rank_{args.local_rank}.txt', 'w') as f:
-            f.write(f"Average iteration time (excluding first): {avg_time:.2f}s\n")
-            for i, t in enumerate(iteration_times):
-                f.write(f"Iteration {i+2}: {t:.2f}s\n")
-    
     return global_step, tr_loss / global_step
 
 
@@ -415,9 +348,6 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
-    parser.add_argument("--master_ip", type=str, default="127.0.0.1")
-    parser.add_argument("--master_port", type=str, default="12345")
-    parser.add_argument("--world_size", type=int, default=1)
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -436,14 +366,6 @@ def main():
 
     # Set seed
     set_seed(args)
-
-    if args.world_size > 1:
-        torch.distributed.init_process_group(
-            backend='gloo',
-            init_method=f"tcp://{args.master_ip}:{args.master_port}",
-            world_size=args.world_size,
-            rank=args.local_rank
-        )
 
     # Prepare GLUE task
     args.task_name = args.task_name.lower()
